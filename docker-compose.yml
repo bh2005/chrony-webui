@@ -3,7 +3,9 @@ services:
   backend:
     build: ./backend
     environment:
-      CHRONYWEBUI_API_KEY: "dev-key-local"
+      CHRONYWEBUI_API_KEY:       "dev-key-local"
+      CHRONYWEBUI_ADMIN_USERNAME: "admin"
+      CHRONYWEBUI_ADMIN_PASSWORD: "admin"
       # Mock-Modus: liefert Demo-Daten ohne echtes chrony
       MOCK_CHRONY: "true"
     ports:
