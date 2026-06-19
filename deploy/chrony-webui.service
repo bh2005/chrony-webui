@@ -1,0 +1,16 @@
+[Unit]
+Description=chrony-webui API Backend
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/chrony-webui
+EnvironmentFile=/etc/chrony-webui/config.env
+ExecStart=/opt/chrony-webui/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
