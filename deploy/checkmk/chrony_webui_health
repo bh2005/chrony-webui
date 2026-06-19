@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+"""
+Check_MK Local Check: chrony-webui NTP Status
+Installieren: /usr/lib/check_mk_agent/local/chrony_webui_health
+Konfiguration via Env-Variablen:
+  CHRONYWEBUI_URL     (default: http://localhost:8080)
+  CHRONYWEBUI_TIMEOUT (default: 5)
+"""
+import os, sys, json
+try:
+    import urllib.request as req
+except ImportError:
+    sys.exit(3)
+
+URL     = os.getenv("CHRONYWEBUI_URL", "http://localhost:8080").rstrip("/")
+TIMEOUT = int(os.getenv("CHRONYWEBUI_TIMEOUT", "5"))
+
+def check():
+    try:
+        r = req.urlopen(f"{URL}/health", timeout=TIMEOUT)
+        data = json.loads(r.read())
+    except Exception as e:
+        print(f"2 chrony_webui_reachable - CRIT: {e}")
+        return
+
+    # Erreichbarkeit
+    print("0 chrony_webui_reachable - OK: API erreichbar")
+
+    # Sync-Status
+    synced  = data.get("synced", False)
+    stratum = data.get("stratum", 0)
+    ref     = data.get("reference", "")
+    leap    = data.get("leap_status", "")
+    online  = data.get("online_sources", 0)
+
+    perf = f"stratum={stratum};4;8;0;16 online_sources={online};1;1"
+
+    if not synced:
+        print(f"2 chrony_ntp_sync stratum={stratum} CRIT: Nicht synchronisiert (Stratum {stratum})")
+    elif stratum >= 8:
+        print(f"1 chrony_ntp_sync {perf} WARN: Stratum {stratum} — Referenz: {ref}")
+    else:
+        print(f"0 chrony_ntp_sync {perf} OK: Stratum {stratum} — Referenz: {ref}")
+
+    # Leap-Status
+    if leap and leap != "Normal":
+        print(f"1 chrony_leap_status - WARN: Leap Status: {leap}")
+    else:
+        print(f"0 chrony_leap_status - OK: Leap Status: {leap or 'Normal'}")
+
+check()

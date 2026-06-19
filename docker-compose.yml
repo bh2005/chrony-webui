@@ -1,0 +1,21 @@
+services:
+
+  backend:
+    build: ./backend
+    environment:
+      CHRONYWEBUI_API_KEY: "dev-key-local"
+      # Mock-Modus: liefert Demo-Daten ohne echtes chrony
+      MOCK_CHRONY: "true"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
