@@ -3,6 +3,12 @@ from config import settings
 
 MOCK = os.getenv("MOCK_CHRONY", "false").lower() == "true"
 
+# In-Memory-State für Mock-Modus
+_mock_config = {
+    "primary":  ["10.122.3.35", "10.122.3.36"],
+    "fallback": ["0.pool.ntp.org", "1.pool.ntp.org"],
+}
+
 def _run(args: list[str]) -> str:
     if MOCK:
         return ""
@@ -95,10 +101,8 @@ def get_activity() -> dict:
 def get_config() -> dict:
     if MOCK:
         return {
-            "primary":  [{"address": "10.122.3.35", "type": "server", "options": "iburst prefer"},
-                         {"address": "10.122.3.36", "type": "server", "options": "iburst prefer"}],
-            "fallback": [{"address": "0.pool.ntp.org", "type": "server", "options": "iburst"},
-                         {"address": "1.pool.ntp.org", "type": "server", "options": "iburst"}],
+            "primary":  [{"address": a, "type": "server", "options": "iburst prefer"} for a in _mock_config["primary"]],
+            "fallback": [{"address": a, "type": "server", "options": "iburst"}        for a in _mock_config["fallback"]],
         }
 
     primary, fallback = [], []
@@ -122,6 +126,8 @@ def get_config() -> dict:
 
 def write_config(primary: list[str], fallback: list[str]) -> None:
     if MOCK:
+        _mock_config["primary"]  = primary
+        _mock_config["fallback"] = fallback
         return
 
     try:
