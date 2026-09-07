@@ -1,4 +1,4 @@
-import subprocess, re, os
+import subprocess, re, os, time
 from config import settings
 
 MOCK = os.getenv("MOCK_CHRONY", "false").lower() == "true"
@@ -7,6 +7,7 @@ MOCK = os.getenv("MOCK_CHRONY", "false").lower() == "true"
 _mock_config = {
     "primary":  ["192.0.2.35", "192.0.2.36"],
     "fallback": ["0.pool.ntp.org", "1.pool.ntp.org"],
+    "allow":    ["10.0.0.0/8"],
 }
 
 def _run(args: list[str]) -> str:
@@ -94,18 +95,102 @@ def get_activity() -> dict:
         return {"online": 2, "offline": 0, "burst_online": 0, "burst_offline": 0, "unresolved": 2}
 
     raw = _run(["activity"])
-    nums = re.findall(r"\d+", raw)
-    keys = ["online", "offline", "burst_online", "burst_offline", "unresolved"]
-    return {k: int(v) for k, v in zip(keys, nums)} if len(nums) >= 5 else {}
+    # Manche chronyc-Versionen stellen der Ausgabe eine Statuszeile ("200 OK") voran —
+    # daher pro Zeile anhand des Labels parsen statt Zahlen positionsbasiert zu zählen.
+    patterns = {
+        "online":        r"(\d+)\s+sources online",
+        "offline":       r"(\d+)\s+sources offline",
+        "burst_online":  r"(\d+)\s+sources doing burst \(return to online\)",
+        "burst_offline": r"(\d+)\s+sources doing burst \(return to offline\)",
+        "unresolved":    r"(\d+)\s+sources with unknown address",
+    }
+    result = {}
+    for key, pattern in patterns.items():
+        m = re.search(pattern, raw)
+        if m:
+            result[key] = int(m.group(1))
+    return result
+
+_SERVERSTATS_FIELDS = [
+    "ntp_packets_received", "ntp_packets_dropped",
+    "command_packets_received", "command_packets_dropped",
+    "client_log_records_dropped",
+    "nts_ke_connections_accepted", "nts_ke_connections_dropped",
+    "authenticated_ntp_packets", "interleaved_ntp_packets",
+]
+
+def get_serverstats() -> dict:
+    """Kumulative Zähler aus `chronyc serverstats` (chrony >= 4.0) — Basis für
+    Anfragen/s-Grafiken im Dashboard (siehe history.py)."""
+    if MOCK:
+        # Kontinuierlich wachsende Fake-Zähler für eine plausible Demo-Grafik
+        t = int(time.time())
+        return {
+            "ntp_packets_received": t * 3 % 1_000_000,
+            "ntp_packets_dropped":  0,
+            "command_packets_received": t % 500,
+            "command_packets_dropped": 0,
+            "client_log_records_dropped": 0,
+            "nts_ke_connections_accepted": 0,
+            "nts_ke_connections_dropped": 0,
+            "authenticated_ntp_packets": 0,
+            "interleaved_ntp_packets": 0,
+        }
+
+    raw = _run(["-c", "serverstats"]).strip()
+    if not raw:
+        return {}
+    parts = raw.split(",")
+    result = {}
+    for key, val in zip(_SERVERSTATS_FIELDS, parts):
+        try:
+            result[key] = int(val)
+        except ValueError:
+            pass
+    return result
+
+_NEVER = 4294967295  # chronyc-Sentinel für "noch nie" bei Last-Feldern
+
+def get_clients() -> list[dict]:
+    """Liste der Hosts, die diesen Server per NTP/chronyc abgefragt haben
+    (`chronyc -c clients`) — Basis für die IP-Liste im Admin-Bereich."""
+    if MOCK:
+        return [
+            {"address": "10.123.40.71", "ntp_hits": 342, "ntp_drops": 0, "ntp_last_seconds": 4,  "cmd_hits": 12, "cmd_drops": 0, "cmd_last_seconds": 220},
+            {"address": "10.123.40.12", "ntp_hits": 88,  "ntp_drops": 1, "ntp_last_seconds": 61, "cmd_hits": 0,  "cmd_drops": 0, "cmd_last_seconds": None},
+        ]
+
+    raw = _run(["-c", "clients"]).strip()
+    if not raw:
+        return []
+    clients = []
+    for line in raw.splitlines():
+        parts = line.split(",")
+        if len(parts) < 10:
+            continue
+        def last(v):
+            n = _int(v)
+            return None if n == _NEVER else n
+        clients.append({
+            "address":          parts[0],
+            "ntp_hits":         _int(parts[1]),
+            "ntp_drops":        _int(parts[2]),
+            "ntp_last_seconds": last(parts[5]),
+            "cmd_hits":         _int(parts[6]),
+            "cmd_drops":        _int(parts[7]),
+            "cmd_last_seconds": last(parts[9]),
+        })
+    return clients
 
 def get_config() -> dict:
     if MOCK:
         return {
             "primary":  [{"address": a, "type": "server", "options": "iburst prefer"} for a in _mock_config["primary"]],
             "fallback": [{"address": a, "type": "server", "options": "iburst"}        for a in _mock_config["fallback"]],
+            "allow":    list(_mock_config["allow"]),
         }
 
-    primary, fallback = [], []
+    primary, fallback, allow = [], [], []
     try:
         with open(settings.chrony_conf_path) as f:
             for line in f:
@@ -120,14 +205,20 @@ def get_config() -> dict:
                         primary.append(entry)
                     else:
                         fallback.append(entry)
+                    continue
+                m = re.match(r"^allow\s+(\S+)", line)
+                if m:
+                    allow.append(m.group(1))
     except FileNotFoundError:
         pass
-    return {"primary": primary, "fallback": fallback}
+    return {"primary": primary, "fallback": fallback, "allow": allow}
 
-def write_config(primary: list[str], fallback: list[str]) -> None:
+def write_config(primary: list[str], fallback: list[str], allow: list[str] | None = None) -> None:
+    allow = allow or []
     if MOCK:
         _mock_config["primary"]  = primary
         _mock_config["fallback"] = fallback
+        _mock_config["allow"]    = allow
         return
 
     try:
@@ -136,15 +227,25 @@ def write_config(primary: list[str], fallback: list[str]) -> None:
     except FileNotFoundError:
         old = ""
 
-    lines = [l for l in old.splitlines() if not re.match(r"^\s*(server|pool)\s+", l)]
+    lines = [
+        l for l in old.splitlines()
+        if not re.match(r"^\s*(server|pool|allow)\s+", l)
+    ]
     new_server_lines = [f"server {a} iburst prefer" for a in primary] + \
-                       [f"server {a} iburst" for a in fallback]
+                       [f"server {a} iburst" for a in fallback] + \
+                       [f"allow {a}" for a in allow]
     content = "\n".join(new_server_lines) + "\n" + "\n".join(lines).lstrip()
 
     with open(settings.chrony_conf_path, "w") as f:
         f.write(content)
 
     subprocess.run(settings.reload_command.split(), check=True, timeout=10)
+
+def parse_offset_seconds(s: str) -> float | None:
+    """Extrahiert den signierten Sekundenwert aus Feldern wie '+0.000000913 seconds'
+    (z.B. tracking['last_offset']) — Basis für die Offset-Grafik im Dashboard."""
+    m = re.search(r"([+-]?\d+\.?\d*(?:[eE][+-]?\d+)?)\s*seconds", s)
+    return float(m.group(1)) if m else None
 
 def _int(s: str) -> int:
     try:

@@ -12,10 +12,14 @@ Web-Frontend zur Überwachung und Konfiguration eines [chrony](https://chrony-pr
 | | |
 |---|---|
 | **Status-Dashboard** | Referenz-Server, Stratum, System-Offset, Root-Delay; alle NTP-Quellen mit Sync-Status (`^*` / `^-`), Reach und Offset; Auto-Refresh alle 10 s |
+| **Verlaufs-Grafiken** | System-Offset und NTP-Anfragen/s als Trend über die letzte Stunde (rollierender In-Memory-Verlauf, kein externer Store) |
+| **Erlaubte Netze** | `allow`-Liste (welche Clients diesen Server als NTP-Quelle nutzen dürfen) direkt im Server-Tab verwaltbar |
+| **Zugriffe** | NTP-Client-IPs (`chronyc clients`) und ein rollierendes Web/API-Zugriffs-Log (IP, Methode, Pfad, Status je Request) im Admin-Bereich |
 | **Server-Konfiguration** | Primäre Server (`iburst prefer`) und Fallback-Server (`iburst`) verwalten; schreibt `chrony.conf` neu und führt `chrony reload` aus |
 | **chrony.conf-Editor** | Direkte Inline-Bearbeitung der Konfigurationsdatei im Browser |
 | **Dienste** | chrony-Service-Status anzeigen und neu starten |
 | **Konto** | Admin-Passwort im laufenden Betrieb ändern |
+| **Zertifikat** | TLS-Zertifikat per ACME (HTTP-01) gegen die interne K+S step-CA ausstellen/erneuern, Status & Ablaufdatum im Blick |
 | **Dark Mode** | Toggle in der Sidebar, persistiert im LocalStorage |
 | **Live-Uhrzeit** | Aktuelle Uhrzeit und Datum in der Sidebar (sekundengenau) |
 | **Login-Schutz** | Status-Dashboard öffentlich; Konfiguration nur nach Login |
@@ -55,6 +59,9 @@ chrony-webui/
 │   ├── auth.py            # Session-Token-Auth, Passwort-Verwaltung
 │   ├── chrony.py          # chronyc-Parser + Mock-Modus
 │   ├── config.py          # Einstellungen via Env-Variablen
+│   ├── acme.py            # ACME-Client-Wrapper (acme.sh) gegen interne step-CA
+│   ├── history.py         # Rollierender In-Memory-Verlauf für Dashboard-Grafiken
+│   ├── accesslog.py       # Rollierendes Web/API-Zugriffs-Log (IP, Methode, Pfad, Status)
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── frontend/
@@ -152,7 +159,14 @@ Alle Variablen haben das Präfix `CHRONYWEBUI_`. Siehe auch [`deploy/config.env.
 | `CHRONYWEBUI_CHRONYC_PATH` | `/usr/bin/chronyc` | Pfad zum chronyc-Binary |
 | `CHRONYWEBUI_RELOAD_COMMAND` | `systemctl reload chrony` | Befehl nach Config-Änderung |
 | `CHRONYWEBUI_RESTART_COMMAND` | `systemctl restart chrony` | Befehl für Service-Neustart |
-| `MOCK_CHRONY` | `false` | `true` = Demo-Daten ohne chrony |
+| `CHRONYWEBUI_ACME_SH_PATH` | `/etc/acme/acme.sh` | Pfad zum installierten acme.sh-Client |
+| `CHRONYWEBUI_ACME_CA_URL` | `https://dekdli047.corp.k-plus-s.net/acme/acme/directory` | Directory-URL der internen step-CA |
+| `CHRONYWEBUI_ACME_CERT_HOME` | `/etc/acme/certs` | acme.sh Cert-Home |
+| `CHRONYWEBUI_ACME_WEBROOT` | `/var/www/chrony-webui` | Webroot für HTTP-01 (= Nginx `root`) |
+| `CHRONYWEBUI_ACME_EMAIL` | `monitoring@k-plus-s.com` | Standard-E-Mail für die Account-Registrierung |
+| `CHRONYWEBUI_CERT_INSTALL_DIR` | `/etc/ssl/chrony-webui` | Zielverzeichnis für fullchain.pem/privkey.pem |
+| `CHRONYWEBUI_CERT_DEPLOY_RELOAD_COMMAND` | `systemctl reload nginx` | Befehl nach Ausstellung/Erneuerung |
+| `MOCK_CHRONY` | `false` | `true` = Demo-Daten ohne chrony (deckt auch das Zertifikat-Tab ab) |
 
 ---
 
@@ -177,12 +191,18 @@ Geschützte Endpunkte benötigen entweder:
 | `POST` | `/auth/change-password` | ✓ | Passwort ändern |
 | `GET` | `/api/status` | — | Tracking-Info + Aktivität |
 | `GET` | `/api/sources` | — | Alle NTP-Quellen |
+| `GET` | `/api/history` | — | Rollierender Verlauf (Offset, NTP-Anfragen/s) der letzten Stunde für die Dashboard-Grafiken |
+| `GET` | `/api/clients` | ✓ | NTP-Client-IPs mit Anfrage-/Drop-Zählern (`chronyc clients`) |
+| `GET` | `/api/access-log` | ✓ | Rollierendes Web/API-Zugriffs-Log (Zeit, IP, Methode, Pfad, Status) |
 | `GET` | `/api/config` | ✓ | Server-Konfiguration lesen |
 | `PUT` | `/api/config` | ✓ | Server-Konfiguration schreiben |
 | `GET` | `/api/chrony-conf` | ✓ | chrony.conf als Rohtext |
 | `PUT` | `/api/chrony-conf` | ✓ | chrony.conf direkt schreiben |
 | `GET` | `/api/service/status` | ✓ | systemd-Service-Status |
 | `POST` | `/api/service/restart` | ✓ | chrony neu starten |
+| `GET` | `/api/cert/status` | ✓ | Status des ACME-Zertifikats (Domain, Aussteller, Ablauf) |
+| `POST` | `/api/cert/issue` | ✓ | Zertifikat per ACME (HTTP-01) ausstellen |
+| `POST` | `/api/cert/renew` | ✓ | Zertifikat erzwungen erneuern |
 
 ### Beispiel: Login + Status abfragen
 
@@ -255,6 +275,34 @@ allow 10.0.0.0/8
 logdir /var/log/chrony
 log tracking measurements statistics
 ```
+
+---
+
+## Zertifikat (ACME gegen interne step-CA)
+
+Über den Tab **Konfiguration → Zertifikat** stellt die WebUI sich selbst ein TLS-Zertifikat
+per ACME (HTTP-01) gegen die interne K+S step-CA aus — ohne den laufenden Nginx zu stoppen
+(Webroot-Modus, `.well-known/acme-challenge` wird über die bestehende Website ausgeliefert).
+
+**Voraussetzung:** `acme.sh` ist auf dem Server installiert und bei der internen CA registriert:
+
+```bash
+sudo bash Scripts/acme/01-setup-acme-client.sh \
+  --ca-url https://dekdli047.corp.k-plus-s.net/acme/acme/directory
+```
+
+**Ablauf:**
+
+1. Domain (CN) und optional SANs/E-Mail im Zertifikat-Tab eintragen
+2. „Zertifikat anfordern" → acme.sh validiert per HTTP-01 über Nginx, Zertifikat landet in
+   `CHRONYWEBUI_CERT_INSTALL_DIR` (Standard `/etc/ssl/chrony-webui`), Nginx wird per
+   `CHRONYWEBUI_CERT_DEPLOY_RELOAD_COMMAND` neu geladen
+3. In [`deploy/nginx.conf`](deploy/nginx.conf) den auskommentierten `443`-Server-Block aktivieren
+   und `nginx -t && systemctl reload nginx`
+4. „Jetzt erneuern" erzwingt eine Erneuerung; automatische Erneuerung siehe
+   `Scripts/acme/03-renew-systemd.sh` (täglicher systemd-Timer, erneuert bei <30 Tagen Restlaufzeit)
+
+Im Docker-Demo-Setup (`MOCK_CHRONY=true`) liefert der Tab Beispieldaten, ohne echte ACME-Requests.
 
 ---
 

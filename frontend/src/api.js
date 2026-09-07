@@ -30,6 +30,7 @@ export const api = {
   // NTP (public)
   status:     () => http.get('/api/status').then(r => r.data),
   sources:    () => http.get('/api/sources').then(r => r.data),
+  history:    (minutes) => http.get('/api/history', { params: minutes ? { minutes } : {} }).then(r => r.data),
 
   // Config (auth)
   getConfig:  ()     => http.get('/api/config').then(r => r.data),
@@ -40,6 +41,15 @@ export const api = {
   // Service (auth)
   serviceStatus:  () => http.get('/api/service/status').then(r => r.data),
   serviceRestart: () => http.post('/api/service/restart').then(r => r.data),
+
+  // Zertifikat / ACME (auth)
+  certStatus: ()     => http.get('/api/cert/status').then(r => r.data),
+  certIssue:  (body) => http.post('/api/cert/issue', body).then(r => r.data),
+  certRenew:  ()     => http.post('/api/cert/renew').then(r => r.data),
+
+  // Zugriffe (auth)
+  clients:   () => http.get('/api/clients').then(r => r.data),
+  accessLog: () => http.get('/api/access-log').then(r => r.data),
 
   changePassword: (current_password, new_password) =>
     http.post('/auth/change-password', { current_password, new_password }).then(r => r.data),

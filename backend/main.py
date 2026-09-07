@@ -4,6 +4,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import subprocess, os
 import chrony
+import acme
+import history
+import accesslog
 from config import settings
 from auth import require_auth, login, logout, change_password, auth_header
 
@@ -22,6 +25,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+def _start_history_sampler():
+    history.start()
+
+@app.middleware("http")
+async def _access_log_middleware(request, call_next):
+    response = await call_next(request)
+    try:
+        accesslog.record(
+            accesslog.get_client_ip(request),
+            request.method, request.url.path, response.status_code,
+        )
+    except Exception:
+        pass
+    return response
 
 # Legacy API-Key (Check_MK / externe Tools)
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -96,11 +115,24 @@ def status():
     return {
         "tracking": chrony.get_tracking(),
         "activity": chrony.get_activity(),
+        "ntp_clients": len(chrony.get_clients()),
     }
 
 @app.get("/api/sources", tags=["ntp"])
 def sources():
     return chrony.get_sources()
+
+@app.get("/api/history", tags=["ntp"])
+def api_history(minutes: int | None = None):
+    return history.get_history(minutes)
+
+@app.get("/api/clients", tags=["ntp"])
+def api_clients(_=Depends(require_auth)):
+    return chrony.get_clients()
+
+@app.get("/api/access-log", tags=["ntp"])
+def api_access_log(_=Depends(require_auth)):
+    return accesslog.get_log()
 
 
 # ── Konfiguration (Login erforderlich) ────────────────────────────────────────
@@ -112,13 +144,14 @@ def get_config(_=Depends(require_auth)):
 class ConfigUpdate(BaseModel):
     primary:  list[str]
     fallback: list[str]
+    allow:    list[str] = []
 
 @app.put("/api/config", tags=["config"])
 def update_config(body: ConfigUpdate, _=Depends(require_auth)):
     if not body.primary and not body.fallback:
         raise HTTPException(400, "Mindestens ein Server erforderlich")
     try:
-        chrony.write_config(body.primary, body.fallback)
+        chrony.write_config(body.primary, body.fallback, body.allow)
     except Exception as e:
         raise HTTPException(500, str(e))
     return {"ok": True}
@@ -148,6 +181,44 @@ def put_raw_conf(body: RawConfUpdate, _=Depends(require_auth)):
     except Exception as e:
         raise HTTPException(500, str(e))
     return {"ok": True}
+
+
+# ── Zertifikat / ACME (interne step-CA, Login erforderlich) ──────────────────
+
+@app.get("/api/cert/status", tags=["cert"])
+def cert_status(_=Depends(require_auth)):
+    return acme.get_status()
+
+class CertIssueRequest(BaseModel):
+    domain: str
+    sans:   list[str] = []
+    email:  str | None = None
+
+@app.post("/api/cert/issue", tags=["cert"])
+def cert_issue(body: CertIssueRequest, _=Depends(require_auth)):
+    if not body.domain.strip():
+        raise HTTPException(400, "Domain erforderlich")
+    try:
+        log = acme.issue_cert(
+            body.domain.strip(),
+            [s.strip() for s in body.sans if s.strip()],
+            body.email.strip() if body.email else None,
+        )
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return {"ok": True, "log": log}
+
+@app.post("/api/cert/renew", tags=["cert"])
+def cert_renew(_=Depends(require_auth)):
+    current = acme.get_status()
+    domain = current.get("domain")
+    if not domain:
+        raise HTTPException(400, "Kein Zertifikat vorhanden — zuerst ausstellen")
+    try:
+        log = acme.renew_cert(domain)
+    except Exception as e:
+        raise HTTPException(500, str(e))
+    return {"ok": True, "log": log}
 
 
 # ── Dienste (Login erforderlich) ──────────────────────────────────────────────

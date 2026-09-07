@@ -1,7 +1,10 @@
 <template>
   <div class="bg-white dark:bg-slate-800 border rounded-xl p-4 shadow-sm space-y-1 transition-colors"
     :class="highlight ? 'border-ks-300 dark:border-ks-700' : 'border-slate-200 dark:border-slate-700'">
-    <p class="text-xs text-slate-400 dark:text-slate-500 uppercase tracking-wide font-medium">{{ label }}</p>
+    <p class="flex items-center gap-1 text-xs text-slate-400 dark:text-slate-500 uppercase tracking-wide font-medium">
+      {{ label }}
+      <HelpHint v-if="hint" :text="hint" />
+    </p>
     <p class="font-mono text-sm font-semibold truncate" :class="valueColor">{{ value || '—' }}</p>
     <p v-if="sub" class="text-xs text-slate-400 dark:text-slate-500 truncate">{{ sub }}</p>
   </div>
@@ -9,6 +12,7 @@
 
 <script setup>
 import { computed } from 'vue'
+import HelpHint from './HelpHint.vue'
 
 const props = defineProps({
   label:     String,
@@ -16,6 +20,7 @@ const props = defineProps({
   sub:       String,
   highlight: Boolean,
   color:     String,
+  hint:      String,
 })
 
 const valueColor = computed(() => ({
